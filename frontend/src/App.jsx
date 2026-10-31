@@ -1,0 +1,540 @@
+import React, { useState, useEffect } from 'react';
+import { Chess } from 'chess.js';
+import ReactMarkdown from 'react-markdown';
+import axios from 'axios';
+
+const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+const PIECE_SVGS = {
+  wP: <path d="M 22.5,9 C 19.5,9 17,11.5 17,14.5 C 17,16.8 18.4,18.7 20.4,19.5 C 17,21 15,24 15,29 L 30,29 C 30,24 28,21 24.6,19.5 C 26.6,18.7 28,16.8 28,14.5 C 28,11.5 25.5,9 22.5,9 z M 11.5,32 L 33.5,32 L 33.5,36 L 11.5,36 L 11.5,32 z" fill="#fff" stroke="#000" strokeWidth="2" />,
+  bP: <path d="M 22.5,9 C 19.5,9 17,11.5 17,14.5 C 17,16.8 18.4,18.7 20.4,19.5 C 17,21 15,24 15,29 L 30,29 C 30,24 28,21 24.6,19.5 C 26.6,18.7 28,16.8 28,14.5 C 28,11.5 25.5,9 22.5,9 z M 11.5,32 L 33.5,32 L 33.5,36 L 11.5,36 L 11.5,32 z" fill="#222" stroke="#000" strokeWidth="2" />,
+  wR: <g fill="#fff" stroke="#000" strokeWidth="2"><path d="M 9,39 L 36,39 L 36,36 L 9,36 L 9,39 z M 12,36 L 12,32 L 33,32 L 33,36 L 12,36 z M 14,29.5 L 14,16.5 L 31,16.5 L 31,29.5 L 14,29.5 z M 11,14 L 11,9 L 15,9 L 15,11 L 20,11 L 20,9 L 25,9 L 25,11 L 30,11 L 30,9 L 34,9 L 34,14 L 11,14 z" /></g>,
+  bR: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 9,39 L 36,39 L 36,36 L 9,36 L 9,39 z M 12,36 L 12,32 L 33,32 L 33,36 L 12,36 z M 14,29.5 L 14,16.5 L 31,16.5 L 31,29.5 L 14,29.5 z M 11,14 L 11,9 L 15,9 L 15,11 L 20,11 L 20,9 L 25,9 L 25,11 L 30,11 L 30,9 L 34,9 L 34,14 L 11,14 z" /></g>,
+  wN: <g fill="#fff" stroke="#000" strokeWidth="2"><path d="M 22,10 C 32.5,11 38.5,18 38,39 L 15,39 C 15,30 25,32.5 23,18" /><path d="M 24,18 C 24.38,20.91 18.45,25.37 16,27 C 13,29 13.18,31.34 11,31 C 9.958,30.06 12.41,27.96 11,28 C 10,28 11.19,29.23 10,30 C 9,30 5.997,31 6,26 C 6,24 12,14 12,14 C 12,14 13.89,12.1 14,10.5 C 13.27,9.506 13.5,8.5 13.5,7.5 C 14.5,6.5 16.5,10 16.5,10 L 18.5,10 C 18.5,10 19.28,8.008 21,7 C 22,7 22,10 22,10" /></g>,
+  bN: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 22,10 C 32.5,11 38.5,18 38,39 L 15,39 C 15,30 25,32.5 23,18" /><path d="M 24,18 C 24.38,20.91 18.45,25.37 16,27 C 13,29 13.18,31.34 11,31 C 9.958,30.06 12.41,27.96 11,28 C 10,28 11.19,29.23 10,30 C 9,30 5.997,31 6,26 C 6,24 12,14 12,14 C 12,14 13.89,12.1 14,10.5 C 13.27,9.506 13.5,8.5 13.5,7.5 C 14.5,6.5 16.5,10 16.5,10 L 18.5,10 C 18.5,10 19.28,8.008 21,7 C 22,7 22,10 22,10" /></g>,
+  wB: <g fill="#fff" stroke="#000" strokeWidth="2"><path d="M 9,36 C 12.39,35.03 19.11,36.43 22.5,34 C 25.89,36.43 32.61,35.03 36,36 C 36,36 37.65,36.54 39,38 C 38.32,38.97 37.35,38.99 36,38.5 C 32.61,37.53 25.89,38.96 22.5,37.5 C 19.11,38.96 12.39,37.53 9,38.5 C 7.646,38.99 6.677,38.97 6,38 C 7.354,36.06 9,36 9,36 z" /><path d="M 15,32 C 17.5,34.5 27.5,34.5 30,32 C 30.5,30.5 30,30 30,30 C 30,27.5 27.5,26 27.5,26 C 33,24.5 33.5,14.5 22.5,10.5 C 11.5,14.5 12,24.5 17.5,26 C 17.5,26 15,27.5 15,30 C 15,30 14.5,30.5 15,32 z" /><circle cx="22.5" cy="8" r="2.5" /></g>,
+  bB: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 9,36 C 12.39,35.03 19.11,36.43 22.5,34 C 25.89,36.43 32.61,35.03 36,36 C 36,36 37.65,36.54 39,38 C 38.32,38.97 37.35,38.99 36,38.5 C 32.61,37.53 25.89,38.96 22.5,37.5 C 19.11,38.96 12.39,37.53 9,38.5 C 7.646,38.99 6.677,38.97 6,38 C 7.354,36.06 9,36 9,36 z" /><path d="M 15,32 C 17.5,34.5 27.5,34.5 30,32 C 30.5,30.5 30,30 30,30 C 30,27.5 27.5,26 27.5,26 C 33,24.5 33.5,14.5 22.5,10.5 C 11.5,14.5 12,24.5 17.5,26 C 17.5,26 15,27.5 15,30 C 15,30 14.5,30.5 15,32 z" /><circle cx="22.5" cy="8" r="2.5" /></g>,
+  wQ: <g fill="#fff" stroke="#000" strokeWidth="2"><path d="M 9,26 C 17.5,24.5 30,24.5 36,26 L 38.5,13.5 L 31,25 L 30.7,10.9 L 25.5,24.5 L 22.5,10 L 19.5,24.5 L 14.3,10.9 L 14,25 L 6.5,13.5 L 9,26 z" /><path d="M 9,26 C 9,28 10.5,28 11.5,30 C 12.5,31.5 12.5,31 12,33.5 C 10.5,34.5 11,36 11,36 C 9.5,37.5 11,38.5 11,38.5 C 17.5,39.5 27.5,39.5 34,38.5 C 34,38.5 35.5,37.5 34,36 C 34,36 34.5,34.5 33,33.5 C 32.5,31 32.5,31.5 33.5,30 C 34.5,28 36,28 36,26 C 27.5,24.5 17.5,24.5 9,26 z" /></g>,
+  bQ: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 9,26 C 17.5,24.5 30,24.5 36,26 L 38.5,13.5 L 31,25 L 30.7,10.9 L 25.5,24.5 L 22.5,10 L 19.5,24.5 L 14.3,10.9 L 14,25 L 6.5,13.5 L 9,26 z" /><path d="M 9,26 C 9,28 10.5,28 11.5,30 C 12.5,31.5 12.5,31 12,33.5 C 10.5,34.5 11,36 11,36 C 9.5,37.5 11,38.5 11,38.5 C 17.5,39.5 27.5,39.5 34,38.5 C 34,38.5 35.5,37.5 34,36 C 34,36 34.5,34.5 33,33.5 C 32.5,31 32.5,31.5 33.5,30 C 34.5,28 36,28 36,26 C 27.5,24.5 17.5,24.5 9,26 z" /></g>,
+  wK: <g fill="#fff" stroke="#000" strokeWidth="2"><path d="M 22.5,11.63 L 22.5,6" /><path d="M 20,8 L 25,8" /><path d="M 22.5,25 C 22.5,25 27,17.5 25.5,14.5 C 25.5,14.5 24.5,12 22.5,12 C 20.5,12 19.5,14.5 19.5,14.5 C 18,17.5 22.5,25 22.5,25" /><path d="M 11.5,37 C 17,40.5 27,40.5 32.5,37 L 32.5,30 C 32.5,30 41.5,25.5 38.5,19.5 C 34.5,13 25,16 22.5,23.5 L 22.5,27 L 22.5,23.5 C 19,16 9.5,13 6.5,19.5 C 3.5,25.5 11.5,29.5 11.5,29.5 L 11.5,37 z" /></g>,
+  bK: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 22.5,11.63 L 22.5,6" /><path d="M 20,8 L 25,8" /><path d="M 22.5,25 C 22.5,25 27,17.5 25.5,14.5 C 25.5,14.5 24.5,12 22.5,12 C 20.5,12 19.5,14.5 19.5,14.5 C 18,17.5 22.5,25 22.5,25" /><path d="M 11.5,37 C 17,40.5 27,40.5 32.5,37 L 32.5,30 C 32.5,30 41.5,25.5 38.5,19.5 C 34.5,13 25,16 22.5,23.5 L 22.5,27 L 22.5,23.5 C 19,16 9.5,13 6.5,19.5 C 3.5,25.5 11.5,29.5 11.5,29.5 L 11.5,37 z" /></g>,
+};
+
+function parseFenToBoard(fen) {
+  const rows = (fen || STARTING_FEN).split(' ')[0].split('/');
+  return rows.map((row) => {
+    const squares = [];
+    for (const char of row) {
+      if (!isNaN(char)) {
+        for (let i = 0; i < parseInt(char, 10); i++) squares.push(null);
+      } else {
+        const color = char === char.toUpperCase() ? 'w' : 'b';
+        const type = char.toUpperCase();
+        squares.push(`${color}${type}`);
+      }
+    }
+    return squares;
+  });
+}
+
+function DirectChessboard({ fen, onSquareClick, selectedSquare, orientation = 'white' }) {
+  const board = parseFenToBoard(fen);
+  const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  
+  const rowIndices = orientation === 'white' ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+  const colIndices = orientation === 'white' ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(8, 56px)',
+      gridTemplateRows: 'repeat(8, 56px)',
+      width: '448px',
+      height: '448px',
+      border: '3px solid #333',
+      borderRadius: '4px',
+      userSelect: 'none',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
+    }}>
+      {rowIndices.map((rIdx, visualRow) =>
+        colIndices.map((cIdx, visualCol) => {
+          const piece = board[rIdx][cIdx];
+          const squareName = `${files[cIdx]}${8 - rIdx}`;
+          const isDark = (rIdx + cIdx) % 2 === 1;
+          const isSelected = selectedSquare === squareName;
+
+          let bg = isDark ? '#769656' : '#eeeed2';
+          if (isSelected) bg = '#f6f669';
+
+          return (
+            <div
+              key={squareName}
+              onClick={() => onSquareClick(squareName)}
+              style={{
+                width: '56px',
+                height: '56px',
+                backgroundColor: bg,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                position: 'relative',
+                cursor: 'pointer'
+              }}
+            >
+              {visualCol === 0 && (
+                <span style={{ position: 'absolute', top: '2px', left: '4px', fontSize: '10px', fontWeight: 'bold', color: isDark ? '#eeeed2' : '#769656' }}>
+                  {8 - rIdx}
+                </span>
+              )}
+              {visualRow === 7 && (
+                <span style={{ position: 'absolute', bottom: '2px', right: '4px', fontSize: '10px', fontWeight: 'bold', color: isDark ? '#eeeed2' : '#769656' }}>
+                  {files[cIdx]}
+                </span>
+              )}
+              {piece && (
+                <svg viewBox="0 0 45 45" style={{ width: '46px', height: '46px' }}>
+                  {PIECE_SVGS[piece]}
+                </svg>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [fenHistory, setFenHistory] = useState([STARTING_FEN]);
+  const [moveLabels, setMoveLabels] = useState(['Start Position']);
+  const [currentStep, setCurrentStep] = useState(0);
+  const [currentFen, setCurrentFen] = useState(STARTING_FEN);
+  const [boardOrientation, setBoardOrientation] = useState('white');
+
+  const [pgnInput, setPgnInput] = useState('');
+  const [overviewMarkdown, setOverviewMarkdown] = useState('');
+  const [whiteBlunders, setWhiteBlunders] = useState([]);
+  const [blackBlunders, setBlackBlunders] = useState([]);
+  
+  const [selectedSide, setSelectedSide] = useState('White');
+  const [activePuzzleIndex, setActivePuzzleIndex] = useState(null);
+
+  // Track which puzzle cards have "Show" best move toggled open (e.g. { "White-0": true })
+  const [revealedMoves, setRevealedMoves] = useState({});
+  // Track whether the "View Solution" Markdown section is expanded for the active puzzle
+  const [showSolutionText, setShowSolutionText] = useState(false);
+
+  const [loading, setLoading] = useState(false);
+  const [statusText, setStatusText] = useState('Paste a PGN and click Analyze.');
+  const [selectedSquare, setSelectedSquare] = useState(null);
+  const [puzzleStatus, setPuzzleStatus] = useState('');
+
+  const currentBlundersList = selectedSide === 'White' ? whiteBlunders : blackBlunders;
+  const activePuzzle = activePuzzleIndex !== null ? currentBlundersList[activePuzzleIndex] : null;
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      if (e.key === 'ArrowLeft') goToStep(currentStep - 1);
+      if (e.key === 'ArrowRight') goToStep(currentStep + 1);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentStep, fenHistory]);
+
+  const handleAnalyze = async () => {
+    if (!pgnInput.trim()) return;
+    setLoading(true);
+    setOverviewMarkdown('');
+    setWhiteBlunders([]);
+    setBlackBlunders([]);
+    setActivePuzzleIndex(null);
+    setRevealedMoves({});
+    setShowSolutionText(false);
+    setPuzzleStatus('');
+
+    try {
+      const res = await axios.post('http://127.0.0.1:8000/api/analyze', { pgn: pgnInput });
+      
+      const backendFens = res.data.fens || [STARTING_FEN];
+      const backendLabels = res.data.move_labels || ['Start Position'];
+      
+      setFenHistory(backendFens);
+      setMoveLabels(backendLabels);
+      setCurrentStep(backendFens.length - 1);
+      setCurrentFen(backendFens[backendFens.length - 1]);
+      
+      setOverviewMarkdown(res.data.overview || '');
+      setWhiteBlunders(res.data.white_blunders || []);
+      setBlackBlunders(res.data.black_blunders || []);
+      setStatusText(`Game loaded (${backendFens.length - 1} moves). Select White or Black below to practice their top 3 blunder puzzles!`);
+    } catch (err) {
+      console.error(err);
+      setStatusText('Error analyzing game. Make sure your FastAPI backend is running on port 8000.');
+    }
+    setLoading(false);
+  };
+
+  const goToStep = (stepIndex) => {
+    const clamped = Math.max(0, Math.min(stepIndex, fenHistory.length - 1));
+    setCurrentStep(clamped);
+    setCurrentFen(fenHistory[clamped]);
+    setSelectedSquare(null);
+    setActivePuzzleIndex(null);
+    setShowSolutionText(false);
+    setPuzzleStatus('');
+    setStatusText(`Move ${clamped} of ${fenHistory.length - 1}: ${moveLabels[clamped] || ''}`);
+  };
+
+  const handleSideChange = (e) => {
+    const newSide = e.target.value;
+    setSelectedSide(newSide);
+    setActivePuzzleIndex(null);
+    setShowSolutionText(false);
+    setPuzzleStatus('');
+    setBoardOrientation(newSide.toLowerCase());
+  };
+
+  const loadPuzzle = (blunder, index) => {
+    setCurrentStep(blunder.ply_before);
+    setCurrentFen(blunder.puzzle_fen);
+    setSelectedSquare(null);
+    setActivePuzzleIndex(index);
+    setShowSolutionText(false); // Hide solution text initially when loading a puzzle
+    setBoardOrientation(blunder.player.toLowerCase());
+    setPuzzleStatus(`Find the best move for ${blunder.player}! (Click a piece, then click a target square)`);
+    setStatusText(
+      `Viewing ${blunder.player} Puzzle #${index + 1}: Move ${blunder.move_number} — Mistake Played: "${blunder.move}" (${blunder.eval_drop_pawns} pawns)`
+    );
+  };
+
+  // Reset the board back to the puzzle starting FEN so the user can try another move
+  const retryActivePuzzle = () => {
+    if (!activePuzzle) return;
+    setCurrentFen(activePuzzle.puzzle_fen);
+    setSelectedSquare(null);
+    setPuzzleStatus(`Position reset! Find the best move for ${activePuzzle.player}.`);
+  };
+
+  // Toggle "Show" / "Hide" for a specific puzzle card's Best Move
+  const toggleRevealMove = (e, side, index) => {
+    e.stopPropagation(); // Don't trigger card click if user just clicked the Show button
+    const key = `${side}-${index}`;
+    setRevealedMoves((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleSquareClick = (squareName) => {
+    if (!selectedSquare) {
+      setSelectedSquare(squareName);
+      return;
+    }
+
+    if (selectedSquare === squareName) {
+      setSelectedSquare(null);
+      return;
+    }
+
+    try {
+      const chessInstance = new Chess(currentFen);
+      const moveObj = chessInstance.move({
+        from: selectedSquare,
+        to: squareName,
+        promotion: 'q'
+      });
+
+      if (moveObj) {
+        setCurrentFen(chessInstance.fen());
+        setSelectedSquare(null);
+
+        // Spoiler-free feedback when attempting a puzzle move!
+        if (activePuzzle) {
+          if (moveObj.san === activePuzzle.best_move) {
+            setPuzzleStatus(`✅ Correct! ${moveObj.san} is the recommended best move!`);
+          } else if (moveObj.san === activePuzzle.move) {
+            setPuzzleStatus(`❌ You played ${moveObj.san}, which was the mistake played in the game! Click "Retry Position" to try again.`);
+          } else {
+            setPuzzleStatus(`❌ ${moveObj.san} is not the recommended move. Click "Retry Position" to try another move!`);
+          }
+        } else {
+          setStatusText(`Custom move played on board: ${moveObj.san}`);
+        }
+      } else {
+        setSelectedSquare(squareName);
+      }
+    } catch (e) {
+      setSelectedSquare(squareName);
+    }
+  };
+
+  return (
+    <div style={{ padding: '2rem', fontFamily: 'Arial, sans-serif', maxWidth: '1200px', margin: '0 auto', color: '#222' }}>
+      <h1>AI Chess Coach & Puzzle Trainer</h1>
+      
+      <div style={{ marginBottom: '1rem' }}>
+        <textarea
+          rows="4"
+          style={{ width: '100%', padding: '0.6rem', borderRadius: '4px', border: '1px solid #ccc', fontFamily: 'monospace' }}
+          placeholder="Paste your PGN string here..."
+          value={pgnInput}
+          onChange={(e) => setPgnInput(e.target.value)}
+        />
+        <button 
+          onClick={handleAnalyze} 
+          disabled={loading}
+          style={{ marginTop: '0.5rem', padding: '0.7rem 1.5rem', background: loading ? '#6c757d' : '#007bff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+        >
+          {loading ? 'Stockfish Analyzing & Agent Thinking...' : 'Analyze Game & Generate Puzzles'}
+        </button>
+      </div>
+
+      <div style={{ padding: '0.75rem', background: '#eef2f7', borderRadius: '6px', marginBottom: '1.5rem', fontWeight: 'bold' }}>
+        {statusText}
+      </div>
+
+      <div style={{ display: 'flex', gap: '2.5rem', flexWrap: 'wrap' }}>
+        {/* Left Column: Direct SVG Board, Move Stepper & White/Black Puzzle Selector */}
+        <div style={{ width: '454px' }}>
+          <DirectChessboard
+            fen={currentFen}
+            onSquareClick={handleSquareClick}
+            selectedSquare={selectedSquare}
+            orientation={boardOrientation}
+          />
+
+          {/* Puzzle Attempt Status & Retry Button */}
+          {puzzleStatus && (
+            <div style={{
+              marginTop: '0.75rem',
+              padding: '0.65rem',
+              background: puzzleStatus.startsWith('✅') ? '#d4edda' : '#fff3cd',
+              border: puzzleStatus.startsWith('✅') ? '1px solid #c3e6cb' : '1px solid #ffeeba',
+              borderRadius: '4px',
+              fontSize: '0.9rem',
+              fontWeight: 'bold',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '0.5rem'
+            }}>
+              <span>{puzzleStatus}</span>
+              {activePuzzle && currentFen !== activePuzzle.puzzle_fen && (
+                <button
+                  onClick={retryActivePuzzle}
+                  style={{
+                    padding: '0.35rem 0.65rem',
+                    background: '#343a40',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  ↺ Retry Position
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Step-Through & Board Flip Controls */}
+          <div style={{ display: 'flex', gap: '0.4rem', marginTop: '1rem', justifyContent: 'space-between', alignItems: 'center' }}>
+            <button onClick={() => goToStep(0)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>&lt;&lt; Start</button>
+            <button onClick={() => goToStep(currentStep - 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>&lt; Prev</button>
+            <span style={{ fontSize: '0.85rem', fontWeight: 'bold' }}>
+              {currentStep} / {fenHistory.length - 1}
+            </span>
+            <button onClick={() => goToStep(currentStep + 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>Next &gt;</button>
+            <button onClick={() => goToStep(fenHistory.length - 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>End &gt;&gt;</button>
+            <button
+              onClick={() => setBoardOrientation(boardOrientation === 'white' ? 'black' : 'white')}
+              style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', background: '#343a40', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.8rem' }}
+              title="Flip Board Orientation"
+            >
+              Flip ⇅
+            </button>
+          </div>
+
+          {/* White / Black Dropdown & Top 3 Puzzles List */}
+          {(whiteBlunders.length > 0 || blackBlunders.length > 0) && (
+            <div style={{ marginTop: '1.5rem', background: '#f1f3f5', padding: '1rem', borderRadius: '8px', border: '1px solid #dee2e6' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+                <label htmlFor="side-select" style={{ fontWeight: 'bold', fontSize: '1rem' }}>
+                  Select Player Puzzles:
+                </label>
+                <select
+                  id="side-select"
+                  value={selectedSide}
+                  onChange={handleSideChange}
+                  style={{
+                    padding: '0.45rem 0.8rem',
+                    fontSize: '0.95rem',
+                    fontWeight: 'bold',
+                    borderRadius: '6px',
+                    border: '1px solid #adb5bd',
+                    cursor: 'pointer',
+                    background: '#fff'
+                  }}
+                >
+                  <option value="White">⚪ White's Top 3 Blunders ({whiteBlunders.length})</option>
+                  <option value="Black">⚫ Black's Top 3 Blunders ({blackBlunders.length})</option>
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.6rem', flexDirection: 'column' }}>
+                {currentBlundersList.map((b, index) => {
+                  const revealKey = `${selectedSide}-${index}`;
+                  const isMoveRevealed = !!revealedMoves[revealKey];
+
+                  return (
+                    <div
+                      key={index}
+                      onClick={() => loadPuzzle(b, index)}
+                      style={{
+                        padding: '0.75rem',
+                        background: activePuzzleIndex === index ? '#d4edda' : '#ffffff',
+                        border: activePuzzleIndex === index ? '2px solid #28a745' : '1px solid #ced4da',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        fontSize: '0.92rem'
+                      }}
+                    >
+                      <div><b>{selectedSide} Puzzle #{index + 1}: Move {b.move_number}</b></div>
+                      <div style={{ marginTop: '6px', color: '#555', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                        <span>
+                          Mistake Played: <b style={{ color: '#d9534f' }}>{b.move}</b> ({b.eval_drop_pawns} pawns)
+                        </span>
+                        <span>
+                          Best Move:{' '}
+                          {isMoveRevealed ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                              <b style={{ color: '#28a745' }}>{b.best_move}</b>
+                              <button
+                                onClick={(e) => toggleRevealMove(e, selectedSide, index)}
+                                style={{
+                                  padding: '2px 6px',
+                                  fontSize: '0.75rem',
+                                  background: '#e9ecef',
+                                  border: '1px solid #adb5bd',
+                                  borderRadius: '4px',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                Hide
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              onClick={(e) => toggleRevealMove(e, selectedSide, index)}
+                              style={{
+                                padding: '2px 8px',
+                                fontSize: '0.8rem',
+                                fontWeight: 'bold',
+                                background: '#6c757d',
+                                color: '#fff',
+                                border: 'none',
+                                borderRadius: '4px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              Show
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+        
+        {/* Right Column: Dynamic Markdown AI Coach Panel with "View Solution" Toggle */}
+        <div style={{ flex: 1, background: '#f8f9fa', padding: '1.5rem', borderRadius: '8px', border: '1px solid #ddd', minWidth: '350px', maxHeight: '750px', overflowY: 'auto' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #e9ecef', paddingBottom: '0.75rem', marginBottom: '1rem' }}>
+            <h3 style={{ margin: 0 }}>
+              {activePuzzleIndex !== null
+                ? `AI Coach: ${selectedSide} Puzzle #${activePuzzleIndex + 1}`
+                : 'AI Coach: Full Game Overview'}
+            </h3>
+            {activePuzzleIndex !== null && (
+              <button
+                onClick={() => setActivePuzzleIndex(null)}
+                style={{
+                  padding: '0.4rem 0.8rem',
+                  background: '#007bff',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '0.85rem',
+                  fontWeight: 'bold'
+                }}
+              >
+                Show Full Game Overview
+              </button>
+            )}
+          </div>
+
+          <div style={{ lineHeight: '1.6' }}>
+            {activePuzzle ? (
+              <div>
+                {/* Spoiler-Free Problem Explanation */}
+                <ReactMarkdown>{activePuzzle.problem_markdown}</ReactMarkdown>
+
+                {/* View Solution Toggle Button */}
+                <div style={{ marginTop: '1.25rem', borderTop: '1px solid #dee2e6', paddingTop: '1rem' }}>
+                  {!showSolutionText ? (
+                    <button
+                      onClick={() => setShowSolutionText(true)}
+                      style={{
+                        padding: '0.6rem 1.2rem',
+                        background: '#28a745',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontWeight: 'bold',
+                        fontSize: '0.95rem'
+                      }}
+                    >
+                      👁️ View Solution & Explanation
+                    </button>
+                  ) : (
+                    <div style={{ background: '#e8f5e9', padding: '1rem', borderRadius: '6px', border: '1px solid #c3e6cb' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                        <span style={{ fontWeight: 'bold', color: '#155724' }}>Solution Revealed</span>
+                        <button
+                          onClick={() => setShowSolutionText(false)}
+                          style={{
+                            padding: '0.25rem 0.6rem',
+                            background: '#fff',
+                            border: '1px solid #adb5bd',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontSize: '0.8rem'
+                          }}
+                        >
+                          Hide Solution
+                        </button>
+                      </div>
+                      <ReactMarkdown>{activePuzzle.solution_markdown}</ReactMarkdown>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : overviewMarkdown ? (
+              <ReactMarkdown>{overviewMarkdown}</ReactMarkdown>
+            ) : (
+              <p style={{ color: '#666' }}>
+                Paste a PGN and click "Analyze Game & Generate Puzzles" to get Stockfish-backed analysis and interactive blunder puzzles for both White and Black.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
