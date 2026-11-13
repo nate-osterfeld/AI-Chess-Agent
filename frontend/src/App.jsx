@@ -3,6 +3,8 @@ import { Chess } from 'chess.js';
 import ReactMarkdown from 'react-markdown';
 import axios from 'axios';
 
+const API_BASE = 'http://127.0.0.1:8000';
+const STORAGE_KEY = 'chess_coach_saved_games';
 const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
 const PIECE_SVGS = {
@@ -19,6 +21,25 @@ const PIECE_SVGS = {
   wK: <g fill="#fff" stroke="#000" strokeWidth="2"><path d="M 22.5,11.63 L 22.5,6" /><path d="M 20,8 L 25,8" /><path d="M 22.5,25 C 22.5,25 27,17.5 25.5,14.5 C 25.5,14.5 24.5,12 22.5,12 C 20.5,12 19.5,14.5 19.5,14.5 C 18,17.5 22.5,25 22.5,25" /><path d="M 11.5,37 C 17,40.5 27,40.5 32.5,37 L 32.5,30 C 32.5,30 41.5,25.5 38.5,19.5 C 34.5,13 25,16 22.5,23.5 L 22.5,27 L 22.5,23.5 C 19,16 9.5,13 6.5,19.5 C 3.5,25.5 11.5,29.5 11.5,29.5 L 11.5,37 z" /></g>,
   bK: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 22.5,11.63 L 22.5,6" /><path d="M 20,8 L 25,8" /><path d="M 22.5,25 C 22.5,25 27,17.5 25.5,14.5 C 25.5,14.5 24.5,12 22.5,12 C 20.5,12 19.5,14.5 19.5,14.5 C 18,17.5 22.5,25 22.5,25" /><path d="M 11.5,37 C 17,40.5 27,40.5 32.5,37 L 32.5,30 C 32.5,30 41.5,25.5 38.5,19.5 C 34.5,13 25,16 22.5,23.5 L 22.5,27 L 22.5,23.5 C 19,16 9.5,13 6.5,19.5 C 3.5,25.5 11.5,29.5 11.5,29.5 L 11.5,37 z" /></g>,
 };
+
+// Extract PGN header tags directly on the frontend so no backend changes are required
+function extractPgnMetadata(pgnText) {
+  const getTag = (tagName) => {
+    const match = pgnText.match(new RegExp(`\\[${tagName}\\s+"([^"]+)"\\]`, 'i'));
+    return match && match[1] && match[1] !== '?' ? match[1].trim() : null;
+  };
+
+  const white = getTag('White') || 'White';
+  const black = getTag('Black') || 'Black';
+  const result = getTag('Result') || '*';
+  const rawDate = getTag('Date');
+  const date = rawDate && !rawDate.includes('?') ? rawDate : new Date().toISOString().slice(0, 10);
+
+  const isOtb = white === 'White' && black === 'Black';
+  const defaultTitle = isOtb ? `Over-the-Board Game (${date})` : `${white} vs. ${black}`;
+
+  return { white, black, result, date, defaultTitle };
+}
 
 function parseFenToBoard(fen) {
   const rows = (fen || STARTING_FEN).split(' ')[0].split('/');
@@ -105,6 +126,28 @@ function DirectChessboard({ fen, onSquareClick, selectedSquare, orientation = 'w
 }
 
 export default function App() {
+  // Navigation Page State: 'analyze' | 'saved'
+  const [activePage, setActivePage] = useState('analyze');
+
+  // LocalStorage Saved Games State (isolated per user's browser)
+  const [savedGames, setSavedGames] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [customTitle, setCustomTitle] = useState('');
+  const [saveSuccessBanner, setSaveSuccessBanner] = useState('');
+
+  // Current Active Game State
+  const [gameMeta, setGameMeta] = useState({
+    white_player: 'White',
+    black_player: 'Black',
+    result: '*',
+    date: ''
+  });
   const [fenHistory, setFenHistory] = useState([STARTING_FEN]);
   const [moveLabels, setMoveLabels] = useState(['Start Position']);
   const [currentStep, setCurrentStep] = useState(0);
@@ -118,10 +161,7 @@ export default function App() {
   
   const [selectedSide, setSelectedSide] = useState('White');
   const [activePuzzleIndex, setActivePuzzleIndex] = useState(null);
-
-  // Track which puzzle cards have "Show" best move toggled open (e.g. { "White-0": true })
   const [revealedMoves, setRevealedMoves] = useState({});
-  // Track whether the "View Solution" Markdown section is expanded for the active puzzle
   const [showSolutionText, setShowSolutionText] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -134,13 +174,14 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      if (activePage !== 'analyze') return;
+      if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
       if (e.key === 'ArrowLeft') goToStep(currentStep - 1);
       if (e.key === 'ArrowRight') goToStep(currentStep + 1);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentStep, fenHistory]);
+  }, [currentStep, fenHistory, activePage]);
 
   const handleAnalyze = async () => {
     if (!pgnInput.trim()) return;
@@ -152,13 +193,25 @@ export default function App() {
     setRevealedMoves({});
     setShowSolutionText(false);
     setPuzzleStatus('');
+    setSaveSuccessBanner('');
 
     try {
-      const res = await axios.post('http://127.0.0.1:8000/api/analyze', { pgn: pgnInput });
+      // Parse [White "..."], [Black "..."], [Result "..."], and [Date "..."] directly from the PGN input
+      const meta = extractPgnMetadata(pgnInput);
+
+      const res = await axios.post(`${API_BASE}/api/analyze`, { pgn: pgnInput });
       
       const backendFens = res.data.fens || [STARTING_FEN];
       const backendLabels = res.data.move_labels || ['Start Position'];
-      
+
+      setGameMeta({
+        white_player: meta.white,
+        black_player: meta.black,
+        result: meta.result,
+        date: meta.date
+      });
+      setCustomTitle(meta.defaultTitle);
+
       setFenHistory(backendFens);
       setMoveLabels(backendLabels);
       setCurrentStep(backendFens.length - 1);
@@ -167,12 +220,74 @@ export default function App() {
       setOverviewMarkdown(res.data.overview || '');
       setWhiteBlunders(res.data.white_blunders || []);
       setBlackBlunders(res.data.black_blunders || []);
-      setStatusText(`Game loaded (${backendFens.length - 1} moves). Select White or Black below to practice their top 3 blunder puzzles!`);
+      setStatusText(
+        `Analysis complete (${backendFens.length - 1} moves). You can name and save this game above!`
+      );
     } catch (err) {
       console.error(err);
       setStatusText('Error analyzing game. Make sure your FastAPI backend is running on port 8000.');
     }
     setLoading(false);
+  };
+
+  // Save current game directly to browser's localStorage
+  const handleSaveCurrentGame = () => {
+    if (fenHistory.length <= 1) return;
+    const finalTitle = customTitle.trim() || `${gameMeta.white_player} vs. ${gameMeta.black_player}`;
+    const newSavedGame = {
+      id: Date.now().toString(),
+      title: finalTitle,
+      saved_at: new Date().toLocaleString(),
+      pgn: pgnInput,
+      white_player: gameMeta.white_player,
+      black_player: gameMeta.black_player,
+      result: gameMeta.result,
+      date: gameMeta.date,
+      overview: overviewMarkdown,
+      white_blunders: whiteBlunders,
+      black_blunders: blackBlunders,
+      fens: fenHistory,
+      move_labels: moveLabels
+    };
+
+    const updated = [newSavedGame, ...savedGames];
+    setSavedGames(updated);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    setSaveSuccessBanner(`✅ Saved "${finalTitle}" to My Saved Games!`);
+  };
+
+  // Load a saved game from localStorage into the board
+  const handleLoadSavedGame = (savedGame) => {
+    setPgnInput(savedGame.pgn || '');
+    setCustomTitle(savedGame.title || '');
+    setGameMeta({
+      white_player: savedGame.white_player || 'White',
+      black_player: savedGame.black_player || 'Black',
+      result: savedGame.result || '*',
+      date: savedGame.date || ''
+    });
+    const fens = savedGame.fens || [STARTING_FEN];
+    setFenHistory(fens);
+    setMoveLabels(savedGame.move_labels || ['Start Position']);
+    setCurrentStep(fens.length - 1);
+    setCurrentFen(fens[fens.length - 1]);
+    setOverviewMarkdown(savedGame.overview || '');
+    setWhiteBlunders(savedGame.white_blunders || []);
+    setBlackBlunders(savedGame.black_blunders || []);
+    setActivePuzzleIndex(null);
+    setRevealedMoves({});
+    setShowSolutionText(false);
+    setPuzzleStatus('');
+    setSaveSuccessBanner('');
+    setStatusText(`Loaded saved game: ${savedGame.title}`);
+    setActivePage('analyze');
+  };
+
+  // Delete a game from localStorage
+  const handleDeleteSavedGame = (id) => {
+    const updated = savedGames.filter((g) => g.id !== id);
+    setSavedGames(updated);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
   };
 
   const goToStep = (stepIndex) => {
@@ -200,7 +315,7 @@ export default function App() {
     setCurrentFen(blunder.puzzle_fen);
     setSelectedSquare(null);
     setActivePuzzleIndex(index);
-    setShowSolutionText(false); // Hide solution text initially when loading a puzzle
+    setShowSolutionText(false);
     setBoardOrientation(blunder.player.toLowerCase());
     setPuzzleStatus(`Find the best move for ${blunder.player}! (Click a piece, then click a target square)`);
     setStatusText(
@@ -208,7 +323,6 @@ export default function App() {
     );
   };
 
-  // Reset the board back to the puzzle starting FEN so the user can try another move
   const retryActivePuzzle = () => {
     if (!activePuzzle) return;
     setCurrentFen(activePuzzle.puzzle_fen);
@@ -216,9 +330,8 @@ export default function App() {
     setPuzzleStatus(`Position reset! Find the best move for ${activePuzzle.player}.`);
   };
 
-  // Toggle "Show" / "Hide" for a specific puzzle card's Best Move
   const toggleRevealMove = (e, side, index) => {
-    e.stopPropagation(); // Don't trigger card click if user just clicked the Show button
+    e.stopPropagation();
     const key = `${side}-${index}`;
     setRevealedMoves((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -246,7 +359,6 @@ export default function App() {
         setCurrentFen(chessInstance.fen());
         setSelectedSquare(null);
 
-        // Spoiler-free feedback when attempting a puzzle move!
         if (activePuzzle) {
           if (moveObj.san === activePuzzle.best_move) {
             setPuzzleStatus(`✅ Correct! ${moveObj.san} is the recommended best move!`);
@@ -267,274 +379,469 @@ export default function App() {
   };
 
   return (
-    <div style={{ padding: '2rem', fontFamily: 'Arial, sans-serif', maxWidth: '1200px', margin: '0 auto', color: '#222' }}>
-      <h1>AI Chess Coach & Puzzle Trainer</h1>
-      
-      <div style={{ marginBottom: '1rem' }}>
-        <textarea
-          rows="4"
-          style={{ width: '100%', padding: '0.6rem', borderRadius: '4px', border: '1px solid #ccc', fontFamily: 'monospace' }}
-          placeholder="Paste your PGN string here..."
-          value={pgnInput}
-          onChange={(e) => setPgnInput(e.target.value)}
-        />
-        <button 
-          onClick={handleAnalyze} 
-          disabled={loading}
-          style={{ marginTop: '0.5rem', padding: '0.7rem 1.5rem', background: loading ? '#6c757d' : '#007bff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-        >
-          {loading ? 'Stockfish Analyzing & Agent Thinking...' : 'Analyze Game & Generate Puzzles'}
-        </button>
-      </div>
-
-      <div style={{ padding: '0.75rem', background: '#eef2f7', borderRadius: '6px', marginBottom: '1.5rem', fontWeight: 'bold' }}>
-        {statusText}
-      </div>
-
-      <div style={{ display: 'flex', gap: '2.5rem', flexWrap: 'wrap' }}>
-        {/* Left Column: Direct SVG Board, Move Stepper & White/Black Puzzle Selector */}
-        <div style={{ width: '454px' }}>
-          <DirectChessboard
-            fen={currentFen}
-            onSquareClick={handleSquareClick}
-            selectedSquare={selectedSquare}
-            orientation={boardOrientation}
-          />
-
-          {/* Puzzle Attempt Status & Retry Button */}
-          {puzzleStatus && (
-            <div style={{
-              marginTop: '0.75rem',
-              padding: '0.65rem',
-              background: puzzleStatus.startsWith('✅') ? '#d4edda' : '#fff3cd',
-              border: puzzleStatus.startsWith('✅') ? '1px solid #c3e6cb' : '1px solid #ffeeba',
-              borderRadius: '4px',
-              fontSize: '0.9rem',
+    <div style={{ padding: '1.5rem 2rem', fontFamily: 'Arial, sans-serif', maxWidth: '1200px', margin: '0 auto', color: '#222' }}>
+      {/* Top Navigation Bar */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderBottom: '2px solid #dee2e6',
+        paddingBottom: '1rem',
+        marginBottom: '1.5rem',
+        flexWrap: 'wrap',
+        gap: '1rem'
+      }}>
+        <h1 style={{ margin: 0, fontSize: '1.75rem' }}>AI Chess Coach & Blunder Puzzle Trainer</h1>
+        
+        <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <button
+            onClick={() => setActivePage('analyze')}
+            style={{
+              padding: '0.6rem 1.2rem',
+              background: activePage === 'analyze' ? '#007bff' : '#e9ecef',
+              color: activePage === 'analyze' ? '#fff' : '#333',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
               fontWeight: 'bold',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem'
-            }}>
-              <span>{puzzleStatus}</span>
-              {activePuzzle && currentFen !== activePuzzle.puzzle_fen && (
-                <button
-                  onClick={retryActivePuzzle}
-                  style={{
-                    padding: '0.35rem 0.65rem',
-                    background: '#343a40',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem',
-                    whiteSpace: 'nowrap'
-                  }}
-                >
-                  ↺ Retry Position
-                </button>
+              fontSize: '0.95rem'
+            }}
+          >
+            ♟️ Analyze & Review Game
+          </button>
+          <button
+            onClick={() => setActivePage('saved')}
+            style={{
+              padding: '0.6rem 1.2rem',
+              background: activePage === 'saved' ? '#007bff' : '#e9ecef',
+              color: activePage === 'saved' ? '#fff' : '#333',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 'bold',
+              fontSize: '0.95rem'
+            }}
+          >
+            📚 My Saved Games ({savedGames.length})
+          </button>
+        </div>
+      </div>
+
+      {/* PAGE 1: ANALYZE & REVIEW GAME */}
+      {activePage === 'analyze' && (
+        <>
+          <div style={{ marginBottom: '1rem' }}>
+            <textarea
+              rows="4"
+              style={{ width: '100%', padding: '0.6rem', borderRadius: '4px', border: '1px solid #ccc', fontFamily: 'monospace' }}
+              placeholder="Paste your PGN string here..."
+              value={pgnInput}
+              onChange={(e) => setPgnInput(e.target.value)}
+            />
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <button 
+                onClick={handleAnalyze} 
+                disabled={loading}
+                style={{ padding: '0.7rem 1.5rem', background: loading ? '#6c757d' : '#007bff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                {loading ? 'Stockfish Analyzing & Agent Thinking...' : 'Analyze Game & Generate Puzzles'}
+              </button>
+
+              {/* Editable Title & Save Game Button appear once a game is analyzed */}
+              {(whiteBlunders.length > 0 || blackBlunders.length > 0) && (
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input
+                    type="text"
+                    value={customTitle}
+                    onChange={(e) => setCustomTitle(e.target.value)}
+                    placeholder="Name this game (e.g., OTB vs. Alex)..."
+                    style={{
+                      padding: '0.65rem 0.8rem',
+                      borderRadius: '4px',
+                      border: '1px solid #adb5bd',
+                      minWidth: '240px',
+                      fontSize: '0.95rem'
+                    }}
+                  />
+                  <button
+                    onClick={handleSaveCurrentGame}
+                    style={{
+                      padding: '0.7rem 1.3rem',
+                      background: '#28a745',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontWeight: 'bold'
+                    }}
+                  >
+                    💾 Save Game
+                  </button>
+                </div>
+              )}
+
+              {saveSuccessBanner && (
+                <span style={{ fontWeight: 'bold', color: '#155724', background: '#d4edda', padding: '0.5rem 0.8rem', borderRadius: '4px' }}>
+                  {saveSuccessBanner}
+                </span>
               )}
             </div>
-          )}
-
-          {/* Step-Through & Board Flip Controls */}
-          <div style={{ display: 'flex', gap: '0.4rem', marginTop: '1rem', justifyContent: 'space-between', alignItems: 'center' }}>
-            <button onClick={() => goToStep(0)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>&lt;&lt; Start</button>
-            <button onClick={() => goToStep(currentStep - 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>&lt; Prev</button>
-            <span style={{ fontSize: '0.85rem', fontWeight: 'bold' }}>
-              {currentStep} / {fenHistory.length - 1}
-            </span>
-            <button onClick={() => goToStep(currentStep + 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>Next &gt;</button>
-            <button onClick={() => goToStep(fenHistory.length - 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>End &gt;&gt;</button>
-            <button
-              onClick={() => setBoardOrientation(boardOrientation === 'white' ? 'black' : 'white')}
-              style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', background: '#343a40', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.8rem' }}
-              title="Flip Board Orientation"
-            >
-              Flip ⇅
-            </button>
           </div>
 
-          {/* White / Black Dropdown & Top 3 Puzzles List */}
-          {(whiteBlunders.length > 0 || blackBlunders.length > 0) && (
-            <div style={{ marginTop: '1.5rem', background: '#f1f3f5', padding: '1rem', borderRadius: '8px', border: '1px solid #dee2e6' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-                <label htmlFor="side-select" style={{ fontWeight: 'bold', fontSize: '1rem' }}>
-                  Select Player Puzzles:
-                </label>
-                <select
-                  id="side-select"
-                  value={selectedSide}
-                  onChange={handleSideChange}
-                  style={{
-                    padding: '0.45rem 0.8rem',
-                    fontSize: '0.95rem',
-                    fontWeight: 'bold',
-                    borderRadius: '6px',
-                    border: '1px solid #adb5bd',
-                    cursor: 'pointer',
-                    background: '#fff'
-                  }}
-                >
-                  <option value="White">⚪ White's Top 3 Blunders ({whiteBlunders.length})</option>
-                  <option value="Black">⚫ Black's Top 3 Blunders ({blackBlunders.length})</option>
-                </select>
-              </div>
-
-              <div style={{ display: 'flex', gap: '0.6rem', flexDirection: 'column' }}>
-                {currentBlundersList.map((b, index) => {
-                  const revealKey = `${selectedSide}-${index}`;
-                  const isMoveRevealed = !!revealedMoves[revealKey];
-
-                  return (
-                    <div
-                      key={index}
-                      onClick={() => loadPuzzle(b, index)}
-                      style={{
-                        padding: '0.75rem',
-                        background: activePuzzleIndex === index ? '#d4edda' : '#ffffff',
-                        border: activePuzzleIndex === index ? '2px solid #28a745' : '1px solid #ced4da',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        fontSize: '0.92rem'
-                      }}
-                    >
-                      <div><b>{selectedSide} Puzzle #{index + 1}: Move {b.move_number}</b></div>
-                      <div style={{ marginTop: '6px', color: '#555', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
-                        <span>
-                          Mistake Played: <b style={{ color: '#d9534f' }}>{b.move}</b> ({b.eval_drop_pawns} pawns)
-                        </span>
-                        <span>
-                          Best Move:{' '}
-                          {isMoveRevealed ? (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                              <b style={{ color: '#28a745' }}>{b.best_move}</b>
-                              <button
-                                onClick={(e) => toggleRevealMove(e, selectedSide, index)}
-                                style={{
-                                  padding: '2px 6px',
-                                  fontSize: '0.75rem',
-                                  background: '#e9ecef',
-                                  border: '1px solid #adb5bd',
-                                  borderRadius: '4px',
-                                  cursor: 'pointer'
-                                }}
-                              >
-                                Hide
-                              </button>
-                            </span>
-                          ) : (
-                            <button
-                              onClick={(e) => toggleRevealMove(e, selectedSide, index)}
-                              style={{
-                                padding: '2px 8px',
-                                fontSize: '0.8rem',
-                                fontWeight: 'bold',
-                                background: '#6c757d',
-                                color: '#fff',
-                                border: 'none',
-                                borderRadius: '4px',
-                                cursor: 'pointer'
-                              }}
-                            >
-                              Show
-                            </button>
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-        
-        {/* Right Column: Dynamic Markdown AI Coach Panel with "View Solution" Toggle */}
-        <div style={{ flex: 1, background: '#f8f9fa', padding: '1.5rem', borderRadius: '8px', border: '1px solid #ddd', minWidth: '350px', maxHeight: '750px', overflowY: 'auto' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #e9ecef', paddingBottom: '0.75rem', marginBottom: '1rem' }}>
-            <h3 style={{ margin: 0 }}>
-              {activePuzzleIndex !== null
-                ? `AI Coach: ${selectedSide} Puzzle #${activePuzzleIndex + 1}`
-                : 'AI Coach: Full Game Overview'}
-            </h3>
-            {activePuzzleIndex !== null && (
-              <button
-                onClick={() => setActivePuzzleIndex(null)}
-                style={{
-                  padding: '0.4rem 0.8rem',
-                  background: '#007bff',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.85rem',
-                  fontWeight: 'bold'
-                }}
-              >
-                Show Full Game Overview
-              </button>
+          <div style={{ padding: '0.75rem', background: '#eef2f7', borderRadius: '6px', marginBottom: '1.5rem', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            <span>{statusText}</span>
+            {fenHistory.length > 1 && (
+              <span style={{ color: '#555' }}>
+                {customTitle || `${gameMeta.white_player} vs. ${gameMeta.black_player}`}
+              </span>
             )}
           </div>
 
-          <div style={{ lineHeight: '1.6' }}>
-            {activePuzzle ? (
-              <div>
-                {/* Spoiler-Free Problem Explanation */}
-                <ReactMarkdown>{activePuzzle.problem_markdown}</ReactMarkdown>
+          <div style={{ display: 'flex', gap: '2.5rem', flexWrap: 'wrap' }}>
+            {/* Left Column: Chessboard, Stepper, and White/Black Blunders */}
+            <div style={{ width: '454px' }}>
+              <DirectChessboard
+                fen={currentFen}
+                onSquareClick={handleSquareClick}
+                selectedSquare={selectedSquare}
+                orientation={boardOrientation}
+              />
 
-                {/* View Solution Toggle Button */}
-                <div style={{ marginTop: '1.25rem', borderTop: '1px solid #dee2e6', paddingTop: '1rem' }}>
-                  {!showSolutionText ? (
+              {puzzleStatus && (
+                <div style={{
+                  marginTop: '0.75rem',
+                  padding: '0.65rem',
+                  background: puzzleStatus.startsWith('✅') ? '#d4edda' : '#fff3cd',
+                  border: puzzleStatus.startsWith('✅') ? '1px solid #c3e6cb' : '1px solid #ffeeba',
+                  borderRadius: '4px',
+                  fontSize: '0.9rem',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '0.5rem'
+                }}>
+                  <span>{puzzleStatus}</span>
+                  {activePuzzle && currentFen !== activePuzzle.puzzle_fen && (
                     <button
-                      onClick={() => setShowSolutionText(true)}
+                      onClick={retryActivePuzzle}
                       style={{
-                        padding: '0.6rem 1.2rem',
-                        background: '#28a745',
+                        padding: '0.35rem 0.65rem',
+                        background: '#343a40',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '0.8rem',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      ↺ Retry Position
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.4rem', marginTop: '1rem', justifyContent: 'space-between', alignItems: 'center' }}>
+                <button onClick={() => goToStep(0)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>&lt;&lt; Start</button>
+                <button onClick={() => goToStep(currentStep - 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>&lt; Prev</button>
+                <span style={{ fontSize: '0.85rem', fontWeight: 'bold' }}>
+                  {currentStep} / {fenHistory.length - 1}
+                </span>
+                <button onClick={() => goToStep(currentStep + 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>Next &gt;</button>
+                <button onClick={() => goToStep(fenHistory.length - 1)} style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', fontWeight: 'bold' }}>End &gt;&gt;</button>
+                <button
+                  onClick={() => setBoardOrientation(boardOrientation === 'white' ? 'black' : 'white')}
+                  style={{ padding: '0.45rem 0.65rem', cursor: 'pointer', background: '#343a40', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.8rem' }}
+                  title="Flip Board Orientation"
+                >
+                  Flip ⇅
+                </button>
+              </div>
+
+              {(whiteBlunders.length > 0 || blackBlunders.length > 0) && (
+                <div style={{ marginTop: '1.5rem', background: '#f1f3f5', padding: '1rem', borderRadius: '8px', border: '1px solid #dee2e6' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+                    <label htmlFor="side-select" style={{ fontWeight: 'bold', fontSize: '1rem' }}>
+                      Select Player Puzzles:
+                    </label>
+                    <select
+                      id="side-select"
+                      value={selectedSide}
+                      onChange={handleSideChange}
+                      style={{
+                        padding: '0.45rem 0.8rem',
+                        fontSize: '0.95rem',
+                        fontWeight: 'bold',
+                        borderRadius: '6px',
+                        border: '1px solid #adb5bd',
+                        cursor: 'pointer',
+                        background: '#fff'
+                      }}
+                    >
+                      <option value="White">⚪ White: {gameMeta.white_player} ({whiteBlunders.length})</option>
+                      <option value="Black">⚫ Black: {gameMeta.black_player} ({blackBlunders.length})</option>
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.6rem', flexDirection: 'column' }}>
+                    {currentBlundersList.map((b, index) => {
+                      const revealKey = `${selectedSide}-${index}`;
+                      const isMoveRevealed = !!revealedMoves[revealKey];
+
+                      return (
+                        <div
+                          key={index}
+                          onClick={() => loadPuzzle(b, index)}
+                          style={{
+                            padding: '0.75rem',
+                            background: activePuzzleIndex === index ? '#d4edda' : '#ffffff',
+                            border: activePuzzleIndex === index ? '2px solid #28a745' : '1px solid #ced4da',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                            fontSize: '0.92rem'
+                          }}
+                        >
+                          <div><b>{selectedSide} Puzzle #{index + 1}: Move {b.move_number}</b></div>
+                          <div style={{ marginTop: '6px', color: '#555', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                            <span>
+                              Mistake Played: <b style={{ color: '#d9534f' }}>{b.move}</b> ({b.eval_drop_pawns} pawns)
+                            </span>
+                            <span>
+                              Best Move:{' '}
+                              {isMoveRevealed ? (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <b style={{ color: '#28a745' }}>{b.best_move}</b>
+                                  <button
+                                    onClick={(e) => toggleRevealMove(e, selectedSide, index)}
+                                    style={{
+                                      padding: '2px 6px',
+                                      fontSize: '0.75rem',
+                                      background: '#e9ecef',
+                                      border: '1px solid #adb5bd',
+                                      borderRadius: '4px',
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    Hide
+                                  </button>
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={(e) => toggleRevealMove(e, selectedSide, index)}
+                                  style={{
+                                    padding: '2px 8px',
+                                    fontSize: '0.8rem',
+                                    fontWeight: 'bold',
+                                    background: '#6c757d',
+                                    color: '#fff',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  Show
+                                </button>
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* Right Column: AI Coach Panel */}
+            <div style={{ flex: 1, background: '#f8f9fa', padding: '1.5rem', borderRadius: '8px', border: '1px solid #ddd', minWidth: '350px', maxHeight: '750px', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #e9ecef', paddingBottom: '0.75rem', marginBottom: '1rem' }}>
+                <h3 style={{ margin: 0 }}>
+                  {activePuzzleIndex !== null
+                    ? `AI Coach: ${selectedSide} Puzzle #${activePuzzleIndex + 1}`
+                    : 'AI Coach: Full Game Overview'}
+                </h3>
+                {activePuzzleIndex !== null && (
+                  <button
+                    onClick={() => setActivePuzzleIndex(null)}
+                    style={{
+                      padding: '0.4rem 0.8rem',
+                      background: '#007bff',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem',
+                      fontWeight: 'bold'
+                    }}
+                  >
+                    Show Full Game Overview
+                  </button>
+                )}
+              </div>
+
+              <div style={{ lineHeight: '1.6' }}>
+                {activePuzzle ? (
+                  <div>
+                    <ReactMarkdown>{activePuzzle.problem_markdown}</ReactMarkdown>
+
+                    <div style={{ marginTop: '1.25rem', borderTop: '1px solid #dee2e6', paddingTop: '1rem' }}>
+                      {!showSolutionText ? (
+                        <button
+                          onClick={() => setShowSolutionText(true)}
+                          style={{
+                            padding: '0.6rem 1.2rem',
+                            background: '#28a745',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            fontWeight: 'bold',
+                            fontSize: '0.95rem'
+                          }}
+                        >
+                          👁️ View Solution & Explanation
+                        </button>
+                      ) : (
+                        <div style={{ background: '#e8f5e9', padding: '1rem', borderRadius: '6px', border: '1px solid #c3e6cb' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                            <span style={{ fontWeight: 'bold', color: '#155724' }}>Solution Revealed</span>
+                            <button
+                              onClick={() => setShowSolutionText(false)}
+                              style={{
+                                padding: '0.25rem 0.6rem',
+                                background: '#fff',
+                                border: '1px solid #adb5bd',
+                                borderRadius: '4px',
+                                cursor: 'pointer',
+                                fontSize: '0.8rem'
+                              }}
+                            >
+                              Hide Solution
+                            </button>
+                          </div>
+                          <ReactMarkdown>{activePuzzle.solution_markdown}</ReactMarkdown>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : overviewMarkdown ? (
+                  <ReactMarkdown>{overviewMarkdown}</ReactMarkdown>
+                ) : (
+                  <p style={{ color: '#666' }}>
+                    Paste a PGN (or bare moves from an over-the-board game) and click "Analyze Game & Generate Puzzles" to get Stockfish-backed analysis and interactive blunder puzzles.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* PAGE 2: MY SAVED GAMES (Browser localStorage) */}
+      {activePage === 'saved' && (
+        <div>
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h2 style={{ margin: 0 }}>My Saved Games</h2>
+            <p style={{ margin: '0.25rem 0 0 0', color: '#555' }}>
+              Games saved in your browser. Click any game below to reopen its board, move history, and 6 blunder puzzles.
+            </p>
+          </div>
+
+          {savedGames.length === 0 ? (
+            <div style={{ padding: '3rem', textAlign: 'center', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #dee2e6' }}>
+              <h3 style={{ marginTop: 0 }}>You haven't saved any games yet</h3>
+              <p style={{ color: '#666' }}>
+                Analyze a game on the "Analyze & Review Game" tab and click "💾 Save Game" to keep it here!
+              </p>
+              <button
+                onClick={() => setActivePage('analyze')}
+                style={{ padding: '0.6rem 1.2rem', background: '#007bff', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                Go Analyze a Game
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '1.25rem' }}>
+              {savedGames.map((g) => (
+                <div
+                  key={g.id}
+                  style={{
+                    background: '#fff',
+                    border: '1px solid #dee2e6',
+                    borderRadius: '8px',
+                    padding: '1.25rem',
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between'
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem' }}>
+                      <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem' }}>
+                        {g.title}
+                      </h3>
+                      {g.result && g.result !== '*' && (
+                        <span style={{ background: '#e9ecef', padding: '2px 8px', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 'bold' }}>
+                          {g.result}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ fontSize: '0.85rem', color: '#666', marginBottom: '0.75rem' }}>
+                      🕒 Saved: {g.saved_at}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', fontSize: '0.85rem' }}>
+                      <span style={{ background: '#eef2f7', padding: '4px 8px', borderRadius: '4px' }}>
+                        ♟️ {(g.fens?.length || 1) - 1} Half-Moves
+                      </span>
+                      <span style={{ background: '#fff3cd', padding: '4px 8px', borderRadius: '4px' }}>
+                        🧩 {(g.white_blunders?.length || 0) + (g.black_blunders?.length || 0)} Puzzles
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                    <button
+                      onClick={() => handleLoadSavedGame(g)}
+                      style={{
+                        flex: 1,
+                        padding: '0.6rem',
+                        background: '#007bff',
                         color: '#fff',
                         border: 'none',
                         borderRadius: '6px',
                         cursor: 'pointer',
-                        fontWeight: 'bold',
-                        fontSize: '0.95rem'
+                        fontWeight: 'bold'
                       }}
                     >
-                      👁️ View Solution & Explanation
+                      📂 Open Game & Puzzles
                     </button>
-                  ) : (
-                    <div style={{ background: '#e8f5e9', padding: '1rem', borderRadius: '6px', border: '1px solid #c3e6cb' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                        <span style={{ fontWeight: 'bold', color: '#155724' }}>Solution Revealed</span>
-                        <button
-                          onClick={() => setShowSolutionText(false)}
-                          style={{
-                            padding: '0.25rem 0.6rem',
-                            background: '#fff',
-                            border: '1px solid #adb5bd',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '0.8rem'
-                          }}
-                        >
-                          Hide Solution
-                        </button>
-                      </div>
-                      <ReactMarkdown>{activePuzzle.solution_markdown}</ReactMarkdown>
-                    </div>
-                  )}
+                    <button
+                      onClick={() => handleDeleteSavedGame(g.id)}
+                      style={{
+                        padding: '0.6rem 0.85rem',
+                        background: '#dc3545',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontWeight: 'bold'
+                      }}
+                      title="Delete Saved Game"
+                    >
+                      🗑️
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ) : overviewMarkdown ? (
-              <ReactMarkdown>{overviewMarkdown}</ReactMarkdown>
-            ) : (
-              <p style={{ color: '#666' }}>
-                Paste a PGN and click "Analyze Game & Generate Puzzles" to get Stockfish-backed analysis and interactive blunder puzzles for both White and Black.
-              </p>
-            )}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
-      </div>
+      )}
     </div>
   );
 }
