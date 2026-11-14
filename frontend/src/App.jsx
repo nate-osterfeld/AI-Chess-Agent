@@ -22,7 +22,17 @@ const PIECE_SVGS = {
   bK: <g fill="#222" stroke="#000" strokeWidth="2"><path d="M 22.5,11.63 L 22.5,6" /><path d="M 20,8 L 25,8" /><path d="M 22.5,25 C 22.5,25 27,17.5 25.5,14.5 C 25.5,14.5 24.5,12 22.5,12 C 20.5,12 19.5,14.5 19.5,14.5 C 18,17.5 22.5,25 22.5,25" /><path d="M 11.5,37 C 17,40.5 27,40.5 32.5,37 L 32.5,30 C 32.5,30 41.5,25.5 38.5,19.5 C 34.5,13 25,16 22.5,23.5 L 22.5,27 L 22.5,23.5 C 19,16 9.5,13 6.5,19.5 C 3.5,25.5 11.5,29.5 11.5,29.5 L 11.5,37 z" /></g>,
 };
 
-// Extract PGN header tags directly on the frontend so no backend changes are required
+// Prints the multi-agent tool trace cleanly to the browser DevTools Console (F12)
+function logTraceToConsole(contextLabel, traceList, answeredBy = 'Head Coach Orchestrator') {
+  console.group(`🤖 Multi-Agent Orchestration Trace — ${contextLabel}`);
+  console.log(`Answered By: ${answeredBy}`);
+  console.log(`Total Specialist Tool Calls: ${traceList.length}`);
+  traceList.forEach((step, idx) => {
+    console.log(`  ${idx + 1}. ${step}`);
+  });
+  console.groupEnd();
+}
+
 function extractPgnMetadata(pgnText) {
   const getTag = (tagName) => {
     const match = pgnText.match(new RegExp(`\\[${tagName}\\s+"([^"]+)"\\]`, 'i'));
@@ -61,7 +71,7 @@ function parseFenToBoard(fen) {
 function DirectChessboard({ fen, onSquareClick, selectedSquare, orientation = 'white' }) {
   const board = parseFenToBoard(fen);
   const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-  
+
   const rowIndices = orientation === 'white' ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
   const colIndices = orientation === 'white' ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
 
@@ -126,10 +136,8 @@ function DirectChessboard({ fen, onSquareClick, selectedSquare, orientation = 'w
 }
 
 export default function App() {
-  // Navigation Page State: 'analyze' | 'saved'
   const [activePage, setActivePage] = useState('analyze');
 
-  // LocalStorage Saved Games State (isolated per user's browser)
   const [savedGames, setSavedGames] = useState(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -141,7 +149,9 @@ export default function App() {
   const [customTitle, setCustomTitle] = useState('');
   const [saveSuccessBanner, setSaveSuccessBanner] = useState('');
 
-  // Current Active Game State
+  // Session ID for SQLiteSession multi-turn conversation memory
+  const [sessionId, setSessionId] = useState(() => `session_${Date.now()}`);
+
   const [gameMeta, setGameMeta] = useState({
     white_player: 'White',
     black_player: 'Black',
@@ -158,11 +168,16 @@ export default function App() {
   const [overviewMarkdown, setOverviewMarkdown] = useState('');
   const [whiteBlunders, setWhiteBlunders] = useState([]);
   const [blackBlunders, setBlackBlunders] = useState([]);
-  
+
   const [selectedSide, setSelectedSide] = useState('White');
   const [activePuzzleIndex, setActivePuzzleIndex] = useState(null);
   const [revealedMoves, setRevealedMoves] = useState({});
   const [showSolutionText, setShowSolutionText] = useState(false);
+
+  // Interactive Position Inspector State
+  const [coachQuestion, setCoachQuestion] = useState('');
+  const [coachConversation, setCoachConversation] = useState([]);
+  const [askingCoach, setAskingCoach] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState('Paste a PGN and click Analyze.');
@@ -194,15 +209,21 @@ export default function App() {
     setShowSolutionText(false);
     setPuzzleStatus('');
     setSaveSuccessBanner('');
+    setCoachConversation([]);
+
+    const newSessionId = `session_${Date.now()}`;
+    setSessionId(newSessionId);
 
     try {
-      // Parse [White "..."], [Black "..."], [Result "..."], and [Date "..."] directly from the PGN input
       const meta = extractPgnMetadata(pgnInput);
-
       const res = await axios.post(`${API_BASE}/api/analyze`, { pgn: pgnInput });
-      
+
       const backendFens = res.data.fens || [STARTING_FEN];
       const backendLabels = res.data.move_labels || ['Start Position'];
+      const traceList = res.data.agent_trace || [];
+
+      // Log orchestration trace to browser DevTools console
+      logTraceToConsole(`Full Game Analysis (${meta.defaultTitle})`, traceList);
 
       setGameMeta({
         white_player: meta.white,
@@ -216,7 +237,7 @@ export default function App() {
       setMoveLabels(backendLabels);
       setCurrentStep(backendFens.length - 1);
       setCurrentFen(backendFens[backendFens.length - 1]);
-      
+
       setOverviewMarkdown(res.data.overview || '');
       setWhiteBlunders(res.data.white_blunders || []);
       setBlackBlunders(res.data.black_blunders || []);
@@ -230,12 +251,59 @@ export default function App() {
     setLoading(false);
   };
 
-  // Save current game directly to browser's localStorage
+  // Ask the Interactive Coach Orchestrator a question (or click a quick-action button)
+  const handleAskCoach = async (customPrompt = null) => {
+    const questionText = (customPrompt ?? coachQuestion).trim();
+    if (!questionText || askingCoach) return;
+
+    setAskingCoach(true);
+    if (!customPrompt) setCoachQuestion('');
+
+    const puzzleContextStr = activePuzzle
+      ? `${activePuzzle.player} Puzzle at Move ${activePuzzle.move_number}: Played blunder '${activePuzzle.move}' (${activePuzzle.eval_drop_pawns} pawns), Stockfish best_move is '${activePuzzle.best_move}', puzzle_fen is '${activePuzzle.puzzle_fen}'`
+      : '';
+
+    setCoachConversation((prev) => [...prev, { role: 'user', text: questionText }]);
+
+    try {
+      const res = await axios.post(`${API_BASE}/api/ask-coach`, {
+        session_id: sessionId,
+        question: questionText,
+        current_fen: currentFen,
+        move_label: moveLabels[currentStep] || `Step ${currentStep}`,
+        active_puzzle_info: puzzleContextStr
+      });
+
+      const traceList = res.data.agent_trace || [];
+      const answeredBy = res.data.answered_by || 'Interactive Coach Orchestrator';
+
+      // Log orchestration trace to browser DevTools console
+      logTraceToConsole(`Position Inspector ("${questionText.slice(0, 40)}...")`, traceList, answeredBy);
+
+      setCoachConversation((prev) => [
+        ...prev,
+        {
+          role: 'coach',
+          text: res.data.reply,
+          answeredBy
+        }
+      ]);
+    } catch (err) {
+      console.error(err);
+      setCoachConversation((prev) => [
+        ...prev,
+        { role: 'coach', text: '⚠️ Error reaching the Coaching Team on port 8000.', answeredBy: 'System' }
+      ]);
+    }
+    setAskingCoach(false);
+  };
+
   const handleSaveCurrentGame = () => {
     if (fenHistory.length <= 1) return;
     const finalTitle = customTitle.trim() || `${gameMeta.white_player} vs. ${gameMeta.black_player}`;
     const newSavedGame = {
       id: Date.now().toString(),
+      session_id: sessionId,
       title: finalTitle,
       saved_at: new Date().toLocaleString(),
       pgn: pgnInput,
@@ -256,10 +324,10 @@ export default function App() {
     setSaveSuccessBanner(`✅ Saved "${finalTitle}" to My Saved Games!`);
   };
 
-  // Load a saved game from localStorage into the board
   const handleLoadSavedGame = (savedGame) => {
     setPgnInput(savedGame.pgn || '');
     setCustomTitle(savedGame.title || '');
+    setSessionId(savedGame.session_id || `session_${savedGame.id}`);
     setGameMeta({
       white_player: savedGame.white_player || 'White',
       black_player: savedGame.black_player || 'Black',
@@ -274,6 +342,7 @@ export default function App() {
     setOverviewMarkdown(savedGame.overview || '');
     setWhiteBlunders(savedGame.white_blunders || []);
     setBlackBlunders(savedGame.black_blunders || []);
+    setCoachConversation([]);
     setActivePuzzleIndex(null);
     setRevealedMoves({});
     setShowSolutionText(false);
@@ -283,7 +352,6 @@ export default function App() {
     setActivePage('analyze');
   };
 
-  // Delete a game from localStorage
   const handleDeleteSavedGame = (id) => {
     const updated = savedGames.filter((g) => g.id !== id);
     setSavedGames(updated);
@@ -379,7 +447,7 @@ export default function App() {
   };
 
   return (
-    <div style={{ padding: '1.5rem 2rem', fontFamily: 'Arial, sans-serif', maxWidth: '1200px', margin: '0 auto', color: '#222' }}>
+    <div style={{ padding: '1.5rem 2rem', fontFamily: 'Arial, sans-serif', maxWidth: '1240px', margin: '0 auto', color: '#222' }}>
       {/* Top Navigation Bar */}
       <div style={{
         display: 'flex',
@@ -392,7 +460,7 @@ export default function App() {
         gap: '1rem'
       }}>
         <h1 style={{ margin: 0, fontSize: '1.75rem' }}>AI Chess Coach & Blunder Puzzle Trainer</h1>
-        
+
         <div style={{ display: 'flex', gap: '0.75rem' }}>
           <button
             onClick={() => setActivePage('analyze')}
@@ -439,15 +507,14 @@ export default function App() {
               onChange={(e) => setPgnInput(e.target.value)}
             />
             <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <button 
-                onClick={handleAnalyze} 
+              <button
+                onClick={handleAnalyze}
                 disabled={loading}
                 style={{ padding: '0.7rem 1.5rem', background: loading ? '#6c757d' : '#007bff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
               >
-                {loading ? 'Stockfish Analyzing & Agent Thinking...' : 'Analyze Game & Generate Puzzles'}
+                {loading ? 'Stockfish Analyzing & Agent Thinking...' : 'Analyze Game'}
               </button>
 
-              {/* Editable Title & Save Game Button appear once a game is analyzed */}
               {(whiteBlunders.length > 0 || blackBlunders.length > 0) && (
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
                   <input
@@ -653,87 +720,191 @@ export default function App() {
                 </div>
               )}
             </div>
-            
-            {/* Right Column: AI Coach Panel */}
-            <div style={{ flex: 1, background: '#f8f9fa', padding: '1.5rem', borderRadius: '8px', border: '1px solid #ddd', minWidth: '350px', maxHeight: '750px', overflowY: 'auto' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #e9ecef', paddingBottom: '0.75rem', marginBottom: '1rem' }}>
-                <h3 style={{ margin: 0 }}>
-                  {activePuzzleIndex !== null
-                    ? `AI Coach: ${selectedSide} Puzzle #${activePuzzleIndex + 1}`
-                    : 'AI Coach: Full Game Overview'}
-                </h3>
-                {activePuzzleIndex !== null && (
+
+            {/* Right Column: AI Coach Panel + Interactive Position Inspector */}
+            <div style={{ flex: 1, minWidth: '360px', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+
+              {/* Main AI Coach Markdown Panel */}
+              <div style={{ background: '#f8f9fa', padding: '1.5rem', borderRadius: '8px', border: '1px solid #ddd', maxHeight: '480px', overflowY: 'auto' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #e9ecef', paddingBottom: '0.75rem', marginBottom: '1rem' }}>
+                  <h3 style={{ margin: 0 }}>
+                    {activePuzzleIndex !== null
+                      ? `AI Coach: ${selectedSide} Puzzle #${activePuzzleIndex + 1}`
+                      : 'AI Coach: Full Game Overview'}
+                  </h3>
+                  {activePuzzleIndex !== null && (
+                    <button
+                      onClick={() => setActivePuzzleIndex(null)}
+                      style={{
+                        padding: '0.4rem 0.8rem',
+                        background: '#007bff',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        fontWeight: 'bold'
+                      }}
+                    >
+                      Show Full Game Overview
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ lineHeight: '1.6' }}>
+                  {activePuzzle ? (
+                    <div>
+                      <ReactMarkdown>{activePuzzle.problem_markdown}</ReactMarkdown>
+
+                      <div style={{ marginTop: '1.25rem', borderTop: '1px solid #dee2e6', paddingTop: '1rem' }}>
+                        {!showSolutionText ? (
+                          <button
+                            onClick={() => setShowSolutionText(true)}
+                            style={{
+                              padding: '0.6rem 1.2rem',
+                              background: '#28a745',
+                              color: '#fff',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              fontWeight: 'bold',
+                              fontSize: '0.95rem'
+                            }}
+                          >
+                            👁️ View Solution & Explanation
+                          </button>
+                        ) : (
+                          <div style={{ background: '#e8f5e9', padding: '1rem', borderRadius: '6px', border: '1px solid #c3e6cb' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                              <span style={{ fontWeight: 'bold', color: '#155724' }}>Solution Revealed</span>
+                              <button
+                                onClick={() => setShowSolutionText(false)}
+                                style={{
+                                  padding: '0.25rem 0.6rem',
+                                  background: '#fff',
+                                  border: '1px solid #adb5bd',
+                                  borderRadius: '4px',
+                                  cursor: 'pointer',
+                                  fontSize: '0.8rem'
+                                }}
+                              >
+                                Hide Solution
+                              </button>
+                            </div>
+                            <ReactMarkdown>{activePuzzle.solution_markdown}</ReactMarkdown>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : overviewMarkdown ? (
+                    <ReactMarkdown>{overviewMarkdown}</ReactMarkdown>
+                  ) : (
+                    <p style={{ color: '#666' }}>
+                      Paste a PGN (or bare moves from an over-the-board game) and click "Analyze Game & Generate Puzzles" to get Stockfish-backed analysis and interactive blunder puzzles.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Interactive Position Inspector & Multi-Turn Coaching Desk (SQLiteSession Memory) */}
+              <div style={{ background: '#ffffff', padding: '1.25rem', borderRadius: '8px', border: '1px solid #ced4da', boxShadow: '0 2px 6px rgba(0,0,0,0.04)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+                  <h4 style={{ margin: 0 }}>🧠 Interactive Position Inspector</h4>
+                  <span style={{ fontSize: '0.78rem', color: '#6c757d', fontFamily: 'monospace' }}>
+                    Session: {sessionId.slice(-8)}
+                  </span>
+                </div>
+                <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.86rem', color: '#555' }}>
+                  Ask the Coaching Team about the current board position or active puzzle.
+                </p>
+
+                {/* Quick-Action Specialist Tool Triggers */}
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.85rem' }}>
                   <button
-                    onClick={() => setActivePuzzleIndex(null)}
+                    onClick={() => handleAskCoach('Inspect the current board mechanics, material balance, checks, and Stockfish evaluation for this FEN.')}
+                    disabled={askingCoach}
+                    style={{ padding: '0.4rem 0.75rem', fontSize: '0.82rem', background: '#e9ecef', border: '1px solid #ced4da', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                  >
+                    📐 Inspect Board & Material
+                  </button>
+                  <button
+                    onClick={() => handleAskCoach('Give me a subtle positional or tactical hint for this position without spoiling the exact move notation.')}
+                    disabled={askingCoach}
+                    style={{ padding: '0.4rem 0.75rem', fontSize: '0.82rem', background: '#e9ecef', border: '1px solid #ced4da', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                  >
+                    💡 Give Me a Tactical Hint
+                  </button>
+                  {activePuzzle && (
+                    <button
+                      onClick={() => handleAskCoach(`Compare the blunder move (${activePuzzle.move}) against Stockfish's best move (${activePuzzle.best_move}) on this puzzle FEN and log the tactical theme.`)}
+                      disabled={askingCoach}
+                      style={{ padding: '0.4rem 0.75rem', fontSize: '0.82rem', background: '#fff3cd', border: '1px solid #ffeeba', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                    >
+                      ⚔️ Compare Blunder vs. Best Move
+                    </button>
+                  )}
+                </div>
+
+                {/* Conversation History Thread */}
+                {coachConversation.length > 0 && (
+                  <div style={{ maxHeight: '260px', overflowY: 'auto', marginBottom: '0.85rem', padding: '0.75rem', background: '#f8f9fa', borderRadius: '6px', border: '1px solid #e9ecef', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                    {coachConversation.map((msg, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                          background: msg.role === 'user' ? '#007bff' : '#ffffff',
+                          color: msg.role === 'user' ? '#fff' : '#222',
+                          border: msg.role === 'user' ? 'none' : '1px solid #dee2e6',
+                          padding: '0.6rem 0.85rem',
+                          borderRadius: '8px',
+                          maxWidth: '92%',
+                          fontSize: '0.9rem'
+                        }}
+                      >
+                        {msg.role === 'coach' && (
+                          <div style={{ fontSize: '0.75rem', fontWeight: 'bold', color: '#0056b3', marginBottom: '4px' }}>
+                            🤖 {msg.answeredBy}
+                          </div>
+                        )}
+                        <div style={{ lineHeight: '1.5' }}>
+                          {msg.role === 'coach' ? <ReactMarkdown>{msg.text}</ReactMarkdown> : msg.text}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Question Input Bar */}
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    placeholder="Ask about this position, a move idea, or a follow-up question..."
+                    value={coachQuestion}
+                    onChange={(e) => setCoachQuestion(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAskCoach();
+                    }}
+                    style={{ flex: 1, padding: '0.55rem 0.75rem', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.9rem' }}
+                  />
+                  <button
+                    onClick={() => handleAskCoach()}
+                    disabled={askingCoach || !coachQuestion.trim()}
                     style={{
-                      padding: '0.4rem 0.8rem',
-                      background: '#007bff',
+                      padding: '0.55rem 1rem',
+                      background: askingCoach ? '#6c757d' : '#007bff',
                       color: '#fff',
                       border: 'none',
                       borderRadius: '4px',
                       cursor: 'pointer',
-                      fontSize: '0.85rem',
                       fontWeight: 'bold'
                     }}
                   >
-                    Show Full Game Overview
+                    {askingCoach ? 'Thinking...' : 'Ask Coach'}
                   </button>
-                )}
+                </div>
               </div>
 
-              <div style={{ lineHeight: '1.6' }}>
-                {activePuzzle ? (
-                  <div>
-                    <ReactMarkdown>{activePuzzle.problem_markdown}</ReactMarkdown>
-
-                    <div style={{ marginTop: '1.25rem', borderTop: '1px solid #dee2e6', paddingTop: '1rem' }}>
-                      {!showSolutionText ? (
-                        <button
-                          onClick={() => setShowSolutionText(true)}
-                          style={{
-                            padding: '0.6rem 1.2rem',
-                            background: '#28a745',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            fontWeight: 'bold',
-                            fontSize: '0.95rem'
-                          }}
-                        >
-                          👁️ View Solution & Explanation
-                        </button>
-                      ) : (
-                        <div style={{ background: '#e8f5e9', padding: '1rem', borderRadius: '6px', border: '1px solid #c3e6cb' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                            <span style={{ fontWeight: 'bold', color: '#155724' }}>Solution Revealed</span>
-                            <button
-                              onClick={() => setShowSolutionText(false)}
-                              style={{
-                                padding: '0.25rem 0.6rem',
-                                background: '#fff',
-                                border: '1px solid #adb5bd',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontSize: '0.8rem'
-                              }}
-                            >
-                              Hide Solution
-                            </button>
-                          </div>
-                          <ReactMarkdown>{activePuzzle.solution_markdown}</ReactMarkdown>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : overviewMarkdown ? (
-                  <ReactMarkdown>{overviewMarkdown}</ReactMarkdown>
-                ) : (
-                  <p style={{ color: '#666' }}>
-                    Paste a PGN (or bare moves from an over-the-board game) and click "Analyze Game & Generate Puzzles" to get Stockfish-backed analysis and interactive blunder puzzles.
-                  </p>
-                )}
-              </div>
             </div>
           </div>
         </>
