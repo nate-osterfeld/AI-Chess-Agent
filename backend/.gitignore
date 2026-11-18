@@ -7,3 +7,7 @@ __pycache__/
 
 stockfish*
 *.exe
+
+chess_coach_memory.db
+training_log.txt
+flagged_messages.txt
