@@ -18,6 +18,10 @@ from agents import (
     SQLiteSession,
     set_tracing_disabled,
     function_tool,
+    GuardrailFunctionOutput,
+    RunContextWrapper,
+    InputGuardrailTripwireTriggered,
+    input_guardrail,
 )
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
@@ -278,6 +282,39 @@ analysis_orchestrator = Agent(
     model=azure_model,
 )
 
+# Input guardrail: keep the interactive coach on chess topics only
+class ChessTopicCheck(BaseModel):
+    is_off_topic: bool
+    reasoning: str
+
+
+chess_topic_guardrail_agent = Agent(
+    name="Chess Topic Guardrail",
+    instructions=(
+        "You are a topic filter for a chess coaching app. "
+        "The input contains a board state followed by the text 'Player Request:' and the player's request. "
+        "Judge ONLY the player's request, never the board state. "
+        "Set is_off_topic to false if the request is about chess: the position, the game, a puzzle, "
+        "a move, a mistake, chess strategy or rules, or a short follow-up such as 'why?', "
+        "'give me a hint', or 'what should I have played?'. "
+        "Set is_off_topic to true if the request is unrelated to chess (for example geography, coding, "
+        "homework, or general chat), even though a board position is attached. "
+        "If you are unsure, set is_off_topic to false. Explain briefly in reasoning."
+    ),
+    output_type=ChessTopicCheck,
+    model=azure_model,
+)
+
+
+@input_guardrail
+async def chess_topic_guardrail(ctx: RunContextWrapper, agent: Agent, input) -> GuardrailFunctionOutput:
+    result = await Runner.run(chess_topic_guardrail_agent, input, context=ctx.context)
+    return GuardrailFunctionOutput(
+        output_info=result.final_output,
+        tripwire_triggered=result.final_output.is_off_topic,
+    )
+
+
 # Orchestrator 2: Interactive Multi-Turn Position & Puzzle Coach (with SQLiteSession memory)
 interactive_coach_orchestrator = Agent(
     name="Interactive Coach Orchestrator",
@@ -287,6 +324,7 @@ interactive_coach_orchestrator = Agent(
     - If the player asks for a HINT on an active puzzle, give a helpful positional or tactical clue WITHOUT spoiling the exact `best_move` notation unless they explicitly ask for the answer.
     - Keep your responses concise, encouraging, and formatted in clean Markdown.""",
     tools=[consult_game_analyst, consult_puzzle_designer],
+    input_guardrails=[chess_topic_guardrail],
     model=azure_model,
 )
 
@@ -450,11 +488,20 @@ async def ask_coach(data: AskCoachInput):
         f"Player Request: {data.question}"
     )
 
-    result = await Runner.run(
-        interactive_coach_orchestrator,
-        context_message,
-        session=session,
-    )
+    try:
+        result = await Runner.run(
+            interactive_coach_orchestrator,
+            context_message,
+            session=session,
+        )
+    except InputGuardrailTripwireTriggered:
+        with open("flagged_messages.txt", "a", encoding="utf-8") as f:
+            f.write(f"Off topic message: {data.question}\n")
+        return {
+            "reply": "Only chess-related questions, please.",
+            "answered_by": "Chess Topic Guardrail",
+            "agent_trace": ["Chess Topic Guardrail -> tripwire triggered"],
+        }
 
     return {
         "reply": result.final_output,
